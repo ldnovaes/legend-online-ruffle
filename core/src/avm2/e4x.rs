@@ -28,6 +28,9 @@ use std::fmt::{self, Debug};
 
 mod is_xml_name;
 
+/// Attribute values up to this length (in UTF-8 bytes) are interned when parsing XML.
+const MAX_INTERNED_ATTRIBUTE_LEN: usize = 64;
+
 /// Gets the E4X namespace for a Multiname, using the default XML namespace
 /// from the current activation if no explicit namespace is specified.
 pub fn namespace_for_multiname<'gc>(
@@ -1055,7 +1058,15 @@ impl<'gc> E4XNode<'gc> {
         for attribute in attributes {
             let value_str = avm2_unescape(&attribute.value)
                 .map_err(|_| make_xml_error(activation, XmlErrorCode::ElementMalformed))?;
-            let value = AvmString::new_utf8(activation.gc(), value_str);
+            // Attribute values repeat a lot in data-heavy documents (e.g. "0", "1",
+            // ids), so short ones are interned and shared instead of allocating a
+            // new string per attribute.
+            let value = if value_str.len() <= MAX_INTERNED_ATTRIBUTE_LEN {
+                let value_wstr = ruffle_wstr::from_utf8(&value_str);
+                activation.strings().intern_wstr(value_wstr).into()
+            } else {
+                AvmString::new_utf8(activation.gc(), value_str)
+            };
 
             let (ns, local_name) = parser.resolve_attribute(attribute.key);
 
