@@ -210,7 +210,7 @@ impl ActivePlayer {
         let movie_url = content.initial_swf_url().clone();
         let readable_name = content.name();
         let initial_allow_list = PathAllowList::new(content_descriptor);
-        let navigator = ExternalNavigatorBackend::new(
+        let mut navigator = ExternalNavigatorBackend::new(
             opt.player
                 .base
                 .to_owned()
@@ -230,6 +230,12 @@ impl ActivePlayer {
                 opt.filesystem_access_mode,
             ),
         );
+        if let Some(dir) = std::env::var_os("RUFFLE_HTTP_CACHE_DIR") {
+            match ruffle_frontend_utils::backends::navigator::http_cache::HttpCache::new(dir, 1 << 30) {
+                Ok(cache) => navigator.set_http_cache(cache),
+                Err(e) => tracing::warn!("HTTP cache unavailable: {e}"),
+            }
+        }
 
         if cfg!(feature = "external_video") && preferences.openh264_enabled() {
             #[cfg(feature = "external_video")]

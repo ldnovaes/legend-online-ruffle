@@ -1,6 +1,8 @@
 mod fetch;
+pub mod http_cache;
 
 use crate::backends::navigator::fetch::{Response, ResponseBody};
+use crate::backends::navigator::http_cache::{Cached, HttpCache, Lookup};
 use crate::content::PlayingContent;
 use async_channel::{Receiver, Sender, TryRecvError};
 use async_io::Timer;
@@ -64,9 +66,16 @@ pub struct ExternalNavigatorBackend<F: FutureSpawner<Error>, I: NavigatorInterfa
     content: Rc<PlayingContent>,
 
     interface: I,
+
+    http_cache: Option<Rc<HttpCache>>,
 }
 
 impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F, I> {
+    /// Keeps `GET` responses on disk, see [`HttpCache`].
+    pub fn set_http_cache(&mut self, cache: HttpCache) {
+        self.http_cache = Some(Rc::new(cache));
+    }
+
     /// Construct a navigator backend with fetch and async capability.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
@@ -130,6 +139,7 @@ impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F,
             socket_mode,
             content,
             interface,
+            http_cache: None,
         }
     }
 }
@@ -195,6 +205,10 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
         };
 
         let client = self.client.clone();
+        let http_cache = self
+            .http_cache
+            .clone()
+            .filter(|_| request.method() == NavigationMethod::Get && request.body().is_none());
 
         match processed_url.scheme() {
             "file" => {
@@ -228,10 +242,38 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     error: Error::FetchError("Network unavailable".to_string()),
                 })?;
 
+                let lookup = http_cache
+                    .as_ref()
+                    .map_or(Lookup::Miss, |cache| cache.lookup(&processed_url));
+                tracing::debug!("fetch {} cache={}", processed_url, match (&lookup, HttpCache::key_for(&processed_url)) {
+                    (Lookup::Fresh(_), _) => "hit",
+                    (Lookup::Stale { .. }, _) => "stale",
+                    (Lookup::Miss, Some(_)) => "miss",
+                    (Lookup::Miss, None) => "nao-cacheavel",
+                });
+                let stale = match lookup {
+                    Lookup::Fresh(cached) => return Ok(cached_response(&processed_url, cached)),
+                    Lookup::Stale {
+                        cached,
+                        etag,
+                        last_modified,
+                    } => Some((cached, etag, last_modified)),
+                    Lookup::Miss => None,
+                };
+
                 let mut request_builder = match request.method() {
                     NavigationMethod::Get => client.get(processed_url.clone()),
                     NavigationMethod::Post => client.post(processed_url.clone()),
                 };
+                if let Some((_, etag, last_modified)) = &stale {
+                    if let Some(etag) = etag {
+                        request_builder = request_builder.header(header::IF_NONE_MATCH, etag);
+                    }
+                    if let Some(last_modified) = last_modified {
+                        request_builder =
+                            request_builder.header(header::IF_MODIFIED_SINCE, last_modified);
+                    }
+                }
                 let (body_data, mime) = request.body().clone().unwrap_or_default();
                 for (name, val) in request.headers().iter() {
                     request_builder = request_builder.header(name, val);
@@ -260,6 +302,12 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     .and_then(get_encoding);
                 let status = response.status().as_u16();
                 let redirected = *response.url() != processed_url;
+                if status == 304
+                    && let (Some(cache), Some((cached, _, _))) = (&http_cache, stale)
+                {
+                    cache.refresh(&processed_url);
+                    return Ok(cached_response(&processed_url, cached));
+                }
                 if !response.status().is_success() {
                     let error = Error::HttpNotOk(
                         format!("Got {}", response.status()),
@@ -270,9 +318,31 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     return Err(ErrorResponse { url, error });
                 }
 
+                let response_body = match &http_cache {
+                    Some(cache) if status == 200 && HttpCache::key_for(&processed_url).is_some() => {
+                        let header_value = |name: header::HeaderName| {
+                            response
+                                .headers()
+                                .get(name)
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_owned)
+                        };
+                        let content_type = header_value(header::CONTENT_TYPE);
+                        let etag = header_value(header::ETAG);
+                        let last_modified = header_value(header::LAST_MODIFIED);
+                        let body = spawn_tokio(response.bytes()).await.map_err(|e| ErrorResponse {
+                            url: url.clone(),
+                            error: Error::FetchError(e.to_string()),
+                        })?;
+                        cache.store(&processed_url, &body, content_type, etag, last_modified);
+                        ResponseBody::File(Ok(body.to_vec()))
+                    }
+                    _ => ResponseBody::Network(Arc::new(Mutex::new(Some(response)))),
+                };
+
                 let response: Box<dyn SuccessResponse> = Box::new(Response {
                     url,
-                    response_body: ResponseBody::Network(Arc::new(Mutex::new(Some(response)))),
+                    response_body,
                     text_encoding,
                     status,
                     redirected,
@@ -482,6 +552,17 @@ where
     tokio::task::unconstrained(receiver)
         .await
         .expect("Oneshot should succeed")
+}
+
+/// Builds a response for a body served from the [`HttpCache`].
+fn cached_response(url: &Url, cached: Cached) -> Box<dyn SuccessResponse> {
+    Box::new(Response {
+        url: url.to_string(),
+        text_encoding: cached.content_type.as_deref().and_then(get_encoding),
+        response_body: ResponseBody::File(Ok(cached.body)),
+        status: 200,
+        redirected: false,
+    })
 }
 
 #[cfg(test)]
