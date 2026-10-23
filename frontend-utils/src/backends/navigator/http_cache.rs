@@ -6,7 +6,8 @@
 //!
 //! Freshness follows RFC 9111 for responses without `Cache-Control`:
 //! - URLs whose file name ends in a content hash (`name_1a2b3c4d.ext`) never
-//!   change, so they are served from disk without asking the server;
+//!   change, so they are served from disk without asking the server, and are
+//!   shared by all hosts of the same domain (mirrors serve the same files);
 //! - other responses are fresh for 10% of the time since `Last-Modified`
 //!   (heuristic freshness), capped at a week, and are then revalidated with
 //!   `If-None-Match` / `If-Modified-Since`;
@@ -84,16 +85,23 @@ impl HttpCache {
             return None;
         }
         if is_content_hashed(url.path()) {
-            let mut key = url.clone();
-            key.set_query(None);
-            key.set_fragment(None);
-            return Some((key.to_string(), true));
+            // The hash identifies the content, so mirrors of the same site
+            // (`res1.example.com`, `res2.example.com`) share the entry.
+            // Scheme and query are irrelevant too.
+            let host = url.host_str()?;
+            return Some((
+                format!("immutable:{}{}", registrable_domain(host), url.path()),
+                true,
+            ));
         }
         if url.query_pairs().any(|(name, _)| name == "rnd") {
             return None;
         }
         let mut key = url.clone();
         key.set_fragment(None);
+        if key.query() == Some("") {
+            key.set_query(None);
+        }
         Some((key.to_string(), false))
     }
 
@@ -218,6 +226,17 @@ impl HttpCache {
     fn path_for(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{:016x}", fnv1a(key.as_bytes())))
     }
+}
+
+/// The last two labels of a host name (`res1.example.com` -> `example.com`).
+/// IP addresses are kept whole.
+fn registrable_domain(host: &str) -> &str {
+    if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
+        return host;
+    }
+    let mut dots = host.rmatch_indices('.').map(|(i, _)| i);
+    dots.next();
+    dots.next().map_or(host, |i| &host[i + 1..])
 }
 
 fn is_static_resource(path: &str) -> bool {
@@ -356,10 +375,22 @@ mod tests {
     fn keys() {
         let (key, immutable) =
             HttpCache::key_for(&url("https://a.example/ui/core_cc0bfa38.swf?rnd=0.5")).unwrap();
-        assert_eq!(key, "https://a.example/ui/core_cc0bfa38.swf");
+        assert_eq!(key, "immutable:a.example/ui/core_cc0bfa38.swf");
         assert!(immutable);
         assert_eq!(
+            HttpCache::key_for(&url("http://res2.a.example/ui/core_cc0bfa38.swf")).unwrap().0,
+            key
+        );
+        assert_ne!(
+            HttpCache::key_for(&url("https://b.example/ui/core_cc0bfa38.swf")).unwrap().0,
+            key
+        );
+        assert_eq!(
             HttpCache::key_for(&url("https://a.example/map/tile_10_5.jpg")),
+            Some(("https://a.example/map/tile_10_5.jpg".to_string(), false))
+        );
+        assert_eq!(
+            HttpCache::key_for(&url("https://a.example/map/tile_10_5.jpg?")),
             Some(("https://a.example/map/tile_10_5.jpg".to_string(), false))
         );
         assert_eq!(HttpCache::key_for(&url("https://a.example/config.xml?rnd=0.3")), None);
