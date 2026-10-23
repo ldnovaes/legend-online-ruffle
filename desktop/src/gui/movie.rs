@@ -179,7 +179,9 @@ impl MovieView {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
@@ -206,6 +208,38 @@ impl MovieView {
             #[cfg(feature = "tracy_images")]
             tracy_frame_captures,
         }
+    }
+
+    /// Diagnóstico do fork Legend Online: copia o frame atual da textura do filme.
+    pub fn snapshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> image::RgbaImage {
+        use ruffle_render_wgpu::utils::{BufferDimensions, buffer_to_image};
+        let size = self.texture.size();
+        let dimensions = BufferDimensions::new(
+            size.width as usize,
+            size.height as usize,
+            self.texture.format(),
+        );
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("legend_snapshot"),
+            size: dimensions.size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            self.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(dimensions.padded_bytes_per_row),
+                    rows_per_image: None,
+                },
+            },
+            size,
+        );
+        let index = queue.submit([encoder.finish()]);
+        buffer_to_image(device, &buffer, &dimensions, Some(index), size)
     }
 
     pub fn render(

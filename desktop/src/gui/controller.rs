@@ -493,6 +493,20 @@ impl GuiController {
         command_buffers.push(encoder.finish());
         self.descriptors.queue.submit(command_buffers);
 
+        // Diagnóstico do fork Legend Online: com LEGEND_SNAPSHOT=<arquivo.png>,
+        // salva o frame do filme a cada 5 segundos.
+        if let (Some(movie_view), Some(path)) = (movie_view, std::env::var_os("LEGEND_SNAPSHOT")) {
+            static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+            let mut last = LAST.lock().expect("snapshot lock");
+            if last.is_none_or(|t| t.elapsed().as_secs() >= 5) {
+                *last = Some(std::time::Instant::now());
+                let image = movie_view.snapshot(&self.descriptors.device, &self.descriptors.queue);
+                if let Err(e) = image.save(&path) {
+                    tracing::warn!("Falha ao salvar snapshot: {e}");
+                }
+            }
+        }
+
         // Free textures only after submitting the command buffer that may still
         // reference them.  Destroying a texture before its usage is submitted
         // causes a wgpu validation panic.
