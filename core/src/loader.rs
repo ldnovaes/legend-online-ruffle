@@ -1215,6 +1215,7 @@ pub fn load_data_into_url_loader<'gc>(
     uc: &UpdateContext<'gc>,
     target: Avm2ScriptObject<'gc>,
     request: Request,
+    load_id: u32,
 ) -> OwnedFuture<(), Error> {
     let player = uc.player_handle();
     let target = Avm2ScriptObjectHandle::stash(uc, target);
@@ -1227,7 +1228,15 @@ pub fn load_data_into_url_loader<'gc>(
         let response = wait_for_full_response(fetch).await;
 
         player.lock().unwrap().update(|uc| {
+            use crate::avm2::globals::slots::flash_net_url_loader as url_loader_slots;
+
             let target = Avm2Object::from(target.fetch(uc));
+
+            // This load was cancelled by `close()` or superseded by a newer `load()`
+            // on the same URLLoader: Flash Player dispatches no events for it.
+            if target.get_slot(url_loader_slots::_LOAD_ID).as_u32() != load_id {
+                return Ok(());
+            }
 
             let mut activation = Avm2Activation::from_nothing(uc);
 

@@ -1,6 +1,4 @@
 package flash.net {
-    import __ruffle__.stub_method;
-
     import flash.events.EventDispatcher;
     import flash.net.URLRequest;
 
@@ -17,6 +15,12 @@ package flash.net {
         [Ruffle(NativeAccessible)]
         public var bytesTotal:uint;
 
+        // Incremented by every `load()` and `close()`. A response is only delivered
+        // if this still matches the value its load started with, so a new load or a
+        // close cancels the previous one, like in Flash Player.
+        [Ruffle(NativeAccessible)]
+        private var _loadId:uint = 0;
+
         public function URLLoader(request:URLRequest = null) {
             if (request != null) {
                 this.load(request);
@@ -26,7 +30,7 @@ package flash.net {
         public native function load(request:URLRequest):void;
 
         public function close():void {
-            stub_method("flash.net.URLLoader", "close");
+            this._loadId++;
         }
     }
 }
