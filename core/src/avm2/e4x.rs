@@ -140,6 +140,22 @@ impl<'gc> E4XNamespace<'gc> {
 }
 
 impl<'gc> E4XNamespace<'gc> {
+    /// Like `as_namespace_object`, but only returns the `Namespace`, without
+    /// allocating a `Namespace` object (`XML.name()` calls this for every node).
+    pub fn as_namespace(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<Namespace<'gc>, Error<'gc>> {
+        if let Some(prefix) = self.prefix
+            && self.uri.is_empty()
+            && !prefix.is_empty()
+        {
+            return Err(make_error_1098(activation, prefix));
+        }
+        let api_version = activation.avm2().root_api_version;
+        Ok(Namespace::package(self.uri, api_version, activation.strings()))
+    }
+
     pub fn as_namespace_object(
         &self,
         activation: &mut Activation<'_, 'gc>,
